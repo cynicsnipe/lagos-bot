@@ -1,0 +1,27 @@
+name: Lagos Bot Cloud Drainer
+
+on:
+  schedule:
+    # Runs automatically every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch: # Allows manual trigger anytime
+
+jobs:
+  run-drainer:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run Draining Bot
+        env:
+          TO: ${{ secrets.TO_DESTINATION_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DURATION_HOURS: "24" # Safe duration under GitHub's 6h max execution cap
+        run: node job.js
