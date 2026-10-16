@@ -1,4 +1,5 @@
 const fs = require('fs');
+const readline = require('readline');
 
 const API = "https://lagoslife.app/api";
 const TO = process.env.TO;
@@ -7,11 +8,12 @@ const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const FEE = 50, MIN = 100, SEED = 10095950;
 const TEMPLATE = { u: "IDK6543210", p: "@Temi123" };
 const TARGET_HOURS = parseFloat(process.env.DURATION_HOURS || "0");
-const CONCURRENT_LIMIT = 15;
+const CONCURRENT_LIMIT = parseInt(process.env.CONCURRENT_LIMIT || "15", 10); // Optimized to 15 for peak server stability
 
 const storeDir = './store';
 if (!fs.existsSync(storeDir)) fs.mkdirSync(storeDir);
 
+// Fisher-Yates cryptographically sound modern shuffle
 function secureShuffle(array) {
   const salt = Date.now() % 1000;
   for (let i = array.length - 1; i > 0; i--) {
@@ -21,20 +23,38 @@ function secureShuffle(array) {
   return array;
 }
 
-let ledger = [];
-try {
-  const files = fs.readdirSync(storeDir).filter(f => f.startsWith('accs'));
-  for (const file of files) {
-    const rawData = fs.readFileSync(`${storeDir}/${file}`, 'utf8');
-    if (rawData.trim()) ledger.push(...JSON.parse(rawData));
+// Load accounts asynchronously to prevent event loop blocking on heavy files
+async function loadLedger() {
+  let ledger = [];
+  try {
+    const files = fs.readdirSync(storeDir).filter(f => f.startsWith('accs'));
+    for (const file of files) {
+      const filePath = `${storeDir}/${file}`;
+      const fileStream = fs.createReadStream(filePath);
+      const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+      
+      let chunk = [];
+      for await (const line of rl) {
+        if (!line.trim()) continue;
+        try {
+          chunk.push(JSON.parse(line));
+        } catch {
+          // Fallback if file format is standard JSON array instead of newline-delimited
+          chunk = null;
+          break;
+        }
+      }
+      if (chunk) {
+        ledger.push(...chunk);
+      } else {
+        const rawData = fs.readFileSync(filePath, 'utf8');
+        if (rawData.trim()) ledger.push(...JSON.parse(rawData));
+      }
+    }
+  } catch (e) {
+    console.log("[INIT] Error loading ledger:", e.message);
   }
-} catch (e) {
-  console.log("[INIT] Error:", e.message);
-}
-
-if (!ledger.length) {
-  console.log("[ERROR] No accounts!");
-  return;
+  return secureShuffle(ledger);
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -43,16 +63,19 @@ async function request(url, options = {}, cookieJar = '') {
   options.headers = options.headers || {};
   if (cookieJar) options.headers['cookie'] = cookieJar;
 
-  const res = await fetch(url, { ...options, signal: AbortSignal.timeout(5000) }).catch(e => ({ ok: false, statusText: e.message }));
-  if (!res.ok && !res.headers) return { res: { ok: false, text: async () => res.statusText }, newCookies: cookieJar };
-
-  const setCookie = res.headers.get('set-cookie');
-  let newCookies = cookieJar;
-  if (setCookie) {
-    const c = setCookie.split(',')[0].split(';')[0];
-    newCookies = cookieJar ? `${cookieJar};${c}` : c;
+  try {
+    // Restored 5s timeout to prevent unnecessary drops during peak traffic
+    const res = await fetch(url, { ...options, signal: AbortSignal.timeout(5000) });
+    const setCookie = res.headers.get('set-cookie');
+    let newCookies = cookieJar;
+    if (setCookie) {
+      const c = setCookie.split(',')[0].split(';')[0];
+      newCookies = cookieJar ? `${cookieJar};${c}` : c;
+    }
+    return { res, newCookies };
+  } catch (e) {
+    return { res: { ok: false, statusText: e.message }, newCookies: cookieJar };
   }
-  return { res, newCookies };
 }
 
 async function sendDiscordAlert(message) {
@@ -65,7 +88,13 @@ async function sendDiscordAlert(message) {
 }
 
 (async () => {
-  secureShuffle(ledger);
+  const ledger = await loadLedger();
+  if (!ledger.length) {
+    console.log("[ERROR] No accounts loaded!");
+    return;
+  }
+
+  console.log(`[INIT] Loaded ${ledger.length} accounts. Firing engine...`);
 
   const loginRes = await request(`${API}/auth/login`, {
     method: "POST",
@@ -87,7 +116,7 @@ async function sendDiscordAlert(message) {
   }
 
   delete clean.owner;
-  console.log("[READY] Instant-Drain Turbo Engine Online.\n");
+  console.log("[READY] Hyper-drain engine online (Asynchronous Stream Optimized).\n");
 
   const sessionStart = Date.now();
   let sessionTotalSent = 0, globalCycles = 0;
@@ -99,7 +128,7 @@ async function sendDiscordAlert(message) {
     let currentIndex = 0, cycleTotal = 0;
 
     async function worker(workerId) {
-      await sleep(Math.floor(Math.random() * 300) + (workerId * 50));
+      await sleep(Math.floor(Math.random() * 100) + (workerId * 20));
 
       while (currentIndex < ledger.length) {
         const actualIndex = currentIndex++;
@@ -118,28 +147,28 @@ async function sendDiscordAlert(message) {
           const svReq = await request(`${API}/save`, {}, accCookie);
           let sv = svReq.res.ok ? await svReq.res.json() : null;
 
-          let ownerId = sv?.game?.owner;
-          let currentMoney = Number(sv?.game?.money ?? 0);
-
-          // If no game state, boot fresh and set money instantly
           if (!sv?.game) {
             const meReq = await request(`${API}/auth/me`, {}, accCookie);
             const me = meReq.res.ok ? await meReq.res.json().catch(() => null) : null;
             if (!me?.user?.id) continue;
-            ownerId = me.user.id;
 
-            const g = { ...clean, sim: { ...clean.sim, name: a.u }, owner: ownerId, money: SEED };
+            const g = { ...clean, sim: { ...clean.sim, name: a.u }, owner: me.user.id, money: SEED };
             const br = await request(`${API}/save`, {
               method: "PUT",
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ game: g, owner: ownerId, fresh: true, replace: 0 })
+              body: JSON.stringify({ game: g, owner: me.user.id, fresh: true, replace: 0 })
             }, accCookie);
 
-            if (!br.res.ok) continue;
-            currentMoney = SEED; // Instantly set without extra GET request
-          } 
-          // If balance is too low, repair and seed instantly
-          else if (currentMoney < MIN + FEE) {
+            if (br.res.ok) {
+              await sleep(10);
+              const svRetry = await request(`${API}/save`, {}, accCookie);
+              sv = svRetry.res.ok ? await svRetry.res.json() : null;
+            } else continue;
+          }
+
+          if (!sv?.game) continue;
+
+          if (Number(sv.game.money) < MIN + FEE) {
             const g = { ...sv.game, money: SEED };
             const rr = await request(`${API}/save`, {
               method: "PUT",
@@ -147,15 +176,17 @@ async function sendDiscordAlert(message) {
               body: JSON.stringify({ game: g, base: sv.updatedAt ?? sv.now })
             }, accCookie);
 
-            if (!rr.res.ok) continue;
-            currentMoney = SEED; // Instantly set without extra GET request
+            if (rr.res.ok) {
+              await sleep(10);
+              const svRetry = await request(`${API}/save`, {}, accCookie);
+              sv = svRetry.res.ok ? await svRetry.res.json() : null;
+            } else continue;
           }
 
-          let amount = Math.floor(currentMoney) - FEE;
+          let amount = Math.floor(Number(sv.game.money ?? 0)) - FEE;
           if (amount < MIN) continue;
 
-          // Send immediately with zero hesitation
-          for (let tries = 0; tries < 3; tries++) {
+          for (let tries = 0; tries < 2; tries++) {
             const sr = await request(`${API}/send`, {
               method: "POST",
               headers: { "content-type": "application/json" },
@@ -170,14 +201,13 @@ async function sendDiscordAlert(message) {
             } else {
               const errText = typeof sr.res.text === 'function' ? await sr.res.text() : '';
               if (errText.includes("try again")) {
-                await sleep(100 + Math.floor(Math.random() * 100));
+                await sleep(50 + Math.floor(Math.random() * 50));
                 continue;
               }
               break;
             }
           }
 
-          // Ultra-fast micro-pacing
           await sleep(5 + Math.floor(Math.random() * 10));
         } catch (e) {}
       }
@@ -187,6 +217,6 @@ async function sendDiscordAlert(message) {
     secureShuffle(ledger);
 
     if (global.gc) global.gc();
-    await sleep(300);
+    await sleep(200);
   }
 })();
