@@ -4,7 +4,7 @@ const API = "https://lagoslife.app/api";
 const TO = process.env.TO;
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 
-const FEE = 50, MIN = 100, SEED = 10095950;
+const FEE = 50, MIN = 100, SEED = 20095950;
 const TEMPLATE = { u: "IDK6543210", p: "@Temi123" };
 const TARGET_HOURS = parseFloat(process.env.DURATION_HOURS || "0");
 const CONCURRENT_LIMIT = 15; // Kept at optimal 15 for stability under heavy server load
