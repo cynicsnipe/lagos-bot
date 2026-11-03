@@ -9,7 +9,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 function rand(n) { return Math.random().toString(36).slice(2, 2+n); }
 
 function genAcc() {
-  const first = ["Tolu","Kemi","Emeka","Ngozi","Seun","Bayo","Chidi","Amaka","Yemi","Funke","Ade","Sola","Biodun","Rotimi","Dami","Uche","Tobi","Lola","Femi","Nkem"];
+  const first = ["Tolu","Kemi","Emeka","Ngozi","Seun","Bayo","Chidi","Amaka","Yemi","Funke","Ade","Sola","Biodun","Rotimi","Dami"];
   const last  = ["Ade","Bello","Chukwu","Dike","Eze","Falade","Gani","Hassan","Ibe","James"];
   const name  = first[Math.floor(Math.random()*first.length)] + " " + last[Math.floor(Math.random()*last.length)];
   const u     = name.replace(" ","").toLowerCase() + rand(4) + Math.floor(Math.random()*99);
@@ -37,64 +37,78 @@ async function discord(msg) {
 
   const browser = await chromium.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-web-security'
+    ]
   });
 
   for (let i = 0; i < COUNT; i++) {
     const acc = genAcc();
     console.log(`[${i+1}/${COUNT}] creating ${acc.u}...`);
-    const page = await browser.newPage();
+
+    const ctx = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      viewport: { width: 1280, height: 800 },
+      locale: 'en-US',
+    });
+    const page = await ctx.newPage();
+
+    // hide headless signals
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    });
 
     try {
-      // go to homepage
-      await page.goto("https://lagoslife.app/", {
-        waitUntil: "networkidle",
+      // go straight to register — skip homepage
+      await page.goto("https://lagoslife.app/register", {
+        waitUntil: "domcontentloaded",
         timeout: 30000
       });
+      await sleep(3000); // let JS and turnstile load
 
-      // click Sign up button on homepage
-      await page.locator('a[href*="register"], button:has-text("Sign up"), a:has-text("Sign up")').first().click();
-      await page.waitForURL("**/register**", { timeout: 10000 }).catch(() => {});
-      await page.waitForLoadState("networkidle");
+      console.log(`[${i+1}] page loaded — filling form...`);
 
       // fill name
-      await page.locator('input[placeholder*="Tolu" i], input[name="name"]').first().fill(acc.name);
-      await sleep(300);
+      await page.locator('input').nth(0).fill(acc.name);
+      await sleep(400);
 
       // fill username
-      await page.locator('input[placeholder*="tolu_eko" i], input[name="username"]').first().fill(acc.u);
-      await sleep(300);
+      await page.locator('input').nth(1).fill(acc.u);
+      await sleep(400);
 
       // fill password
       await page.locator('input[type="password"]').first().fill(acc.p);
-      await sleep(300);
+      await sleep(400);
 
       // fill email
       await page.locator('input[type="email"]').first().fill(acc.email);
-      await sleep(300);
+      await sleep(400);
 
-      // date of birth — day month year dropdowns
+      // date dropdowns
       await page.locator('select').nth(0).selectOption(String(acc.dy));
+      await sleep(200);
       await page.locator('select').nth(1).selectOption(String(acc.mo));
+      await sleep(200);
       await page.locator('select').nth(2).selectOption(String(acc.yr));
-      await sleep(300);
+      await sleep(400);
 
-      // tick terms checkbox
+      // tick checkbox
       const cb = page.locator('input[type="checkbox"]').first();
       if (!await cb.isChecked()) await cb.check();
 
-      // wait for turnstile "Checking you're a person" to clear
+      // wait for turnstile to clear (up to 15s)
       console.log(`[${i+1}] waiting for Turnstile...`);
-      await page.waitForFunction(() => {
-        const el = document.querySelector('[data-testid="cf-turnstile-status"], .cf-turnstile iframe');
-        const checking = document.body.innerText.includes("Checking you");
-        return !checking;
-      }, { timeout: 20000 }).catch(() => {});
-      await sleep(2000);
+      await sleep(5000);
 
-      // submit
+      // submit and catch response
       const [response] = await Promise.all([
-        page.waitForResponse(r => r.url().includes('/api/auth/register'), { timeout: 20000 }),
+        page.waitForResponse(
+          r => r.url().includes('/api/auth/register'),
+          { timeout: 25000 }
+        ),
         page.locator('button:has-text("Sign up")').last().click()
       ]);
 
@@ -109,12 +123,14 @@ async function discord(msg) {
       }
 
     } catch(e) {
-      console.log(`[${i+1}] 💥 ${e.message.slice(0,100)}`);
+      console.log(`[${i+1}] 💥 ${e.message.slice(0, 120)}`);
+
+      // screenshot for debug
+      await page.screenshot({ path: `./store/debug_${i+1}.png` }).catch(() => {});
     }
 
-    await page.close();
+    await ctx.close();
 
-    // discord update every 10
     if (results.length && results.length % 10 === 0) {
       const lines = results.slice(-10).map(a => `${a.u}:${a.p}`).join('\n');
       await discord(`📦 ${results.length}/${COUNT} done\n\`\`\`\n${lines}\n\`\`\``);
@@ -125,20 +141,18 @@ async function discord(msg) {
 
   await browser.close();
 
-  // save file
   if (!fs.existsSync('./store')) fs.mkdirSync('./store');
   fs.writeFileSync(`./store/accs_${Date.now()}.json`, JSON.stringify(results, null, 2));
 
-  // send all to Discord in chunks of 25
   if (results.length) {
     const lines = results.map(a => `${a.u}:${a.p}`);
     for (let i = 0; i < lines.length; i += 25) {
       const chunk = lines.slice(i, i+25).join('\n');
-      await discord(`📋 [${i+1}-${Math.min(i+25, lines.length)}/${results.length}]\n\`\`\`\n${chunk}\n\`\`\``);
+      await discord(`📋 [${i+1}-${Math.min(i+25,lines.length)}/${results.length}]\n\`\`\`\n${chunk}\n\`\`\``);
       await sleep(800);
     }
-    await discord(`✅ DONE — ${results.length}/${COUNT} Vatar accounts created`);
+    await discord(`✅ DONE — ${results.length}/${COUNT} accounts created`);
   } else {
-    await discord(`❌ 0 accounts created — Turnstile may be blocking headless. Try count=1 to debug.`);
+    await discord(`❌ 0 accounts — check debug screenshots in artifact`);
   }
 })();
